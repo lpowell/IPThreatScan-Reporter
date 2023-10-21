@@ -1,11 +1,17 @@
 param([switch]$Console)
-# Turn this shit off, geez 
+# Turn this shit off
+# Get-Variable -Name *preference 
 $global:ErrorActionPreference = "SilentlyContinue"
+$global:ProgressPreference = "SilentlyContinue"
+$Global:WarningPreference = "SilentlyContinue"
+
+# Build to exe with ps2exe -inputFile PSThreat.ps1 -outFile PSThreatScanner.exe -noConsole
+
 # Threat hunting IP Scanner -- for Reporting integration.
 
 if($Console){
     # Pull API resources to JSON file
-    echo "We're gonna do stuff here lol"
+    # This is next
     exit
 }
 function CreateGUI{
@@ -31,7 +37,6 @@ function IP_ScanBox($MainForm){
     $ThreatSearch.Width = 300
     $ThreatSearch.Height = 10
     $MainForm.Controls.Add($ThreatSearch)
-    Write-Host $ThreatSearch.Text
     $Button = New-Object System.Windows.Forms.Button 
     $Button.Text = "Submit"
     $Button.Location = New-Object System.Drawing.Point(125,125)
@@ -68,6 +73,7 @@ function IP_ScanBox($MainForm){
     $MainForm.Controls.Add($ShodanKey)
     $MainForm.Controls.Add($NistKey)
     $Button.Add_Click({
+        Write-Host "Getting Information"
         $Save = [Environment]::GetFolderPath("MyDocuments")
         try{
             New-Item -path "$save" -Name "IPThreatScan" -ItemType "directory" -erroraction Stop
@@ -86,8 +92,6 @@ function IP_ScanBox($MainForm){
         $SHAPI = $ShodanKey.Text
         $global:NAPI = $NistKey.Text
         $SearchValue = $ThreatSearch.Text
-        write-host $SearchValue
-        Write-Host $VTAPI
         $Header = @{}
         $Header.add("x-apikey","$VTAPI")
         $URI = "https://www.virustotal.com/api/v3/ip_addresses/" + $SearchValue
@@ -106,7 +110,7 @@ function GetVT($URI, $Header){
     $Header.Values
     $URI
     #$VTResults = Invoke-RestMethod -Uri $URI -Method GET -Headers $Header -verbose -erroraction Inquire
-    $VTResults = Invoke-WebRequest -URI $URI -Header $Header -Verbose -Outfile VTResults.json
+    $VTResults = Invoke-WebRequest -URI $URI -Header $Header -Outfile VTResults.json 
     $VTResults = Get-Content VTResults.json -raw | ConvertFrom-Json
     return $VTResults | Select -ExpandProperty data | Select -ExpandProperty attributes
 }
@@ -115,7 +119,7 @@ function GetTM($IP){
     $results =@()
     foreach($x in 1..6){
         $URI = "https://api.threatminer.org/v2/host.php?q=$IP" + "&rt=" + "$x"
-        $Results += (Invoke-RestMethod -URI $URI -Verbose -outfile "TMResults$x.json")
+        $Results += (Invoke-RestMethod -URI $URI -outfile "TMResults$x.json")
         }   
     return $results
 }
@@ -136,7 +140,6 @@ function GetShodanResults($IP, $SHAPI){
 function GetCVE($vuln){
     try{
         $URI = "https://services.nvd.nist.gov/rest/json/cves/2.0?cveId="+$vuln
-        write-host $URI
         $Results = Invoke-RestMethod -Method GET -Uri $URI -Headers @{'apikey'=$NAPI}| Select -ExpandProperty vulnerabilities | Select -ExpandProperty cve
     }catch{
         $Results = "Failed to get request"
@@ -149,9 +152,8 @@ function StartReport($VTResults, $TMResults, $Address, $ShodanResults){
     # Create Report Variables
     Write-Host "Writing Report"
     $Detections = $VTResults | Select -expandproperty last_analysis_stats  
-    $JoinDetections = "harmless:"+$Detections.harmless+" and malicious:"+$Detections.malicious
+    $JoinDetections = "harmless: "+$Detections.harmless+" and malicious: "+$Detections.malicious
     $DetectionRating = if($Detections.malicious -gt $Detections.harmless){"malicious"}else{"harmless"}
-    Write-Host $VTResults.last_analysis_date
     $DetectionsTime = ConvertUnixTime $VTResults.last_analysis_date
     $DetectionRecent = if((New-TimeSpan -Start $DetectionsTime -End (Get-Date) | Select TotalDays).TotalDays -gt 30){"not recent"}else{"recent"}
     $DetectionVotes = $VTResults.Total_votes
@@ -162,6 +164,13 @@ function StartReport($VTResults, $TMResults, $Address, $ShodanResults){
     $DetectionDomains = (Get-Content -raw "TMResults3.json" | ConvertFrom-Json | select -ExpandProperty results).uri | Out-String
     $DetectionHashes = Get-Content -raw "TMResults4.json" | ConvertFrom-Json | Select-Object -ExpandProperty results
     $DetectionFiles = (Get-Content -Raw "TMResults6.json" | ConvertFrom-Json | Select-Object -ExpandProperty results).filename | Out-String
+
+    # Get Address
+    $GeoAddressURI = "https://nominatim.openstreetmap.org/reverse?lat="+$ShodanResults.latitude+"&lon="+$ShodanResults.longitude
+    $GeoAddress = (Invoke-RestMethod -Method GET -Uri $GeoAddressURI | Select-Object -ExpandProperty reversegeocode | Select-Object -ExpandProperty result).'#text' | Out-String
+    $GeoAddressLink = $GeoAddress.Replace(", ","+")
+    $GeoAddressLink = "https://www.google.com/maps/search/"+$GeoAddressLink 
+
 
     # Title and summary
     $Word = New-Object -ComObject word.application
@@ -214,7 +223,7 @@ The address {0}, appears to operate out of {1} and is owned by {2}. Furthermore,
     $Selection.TypeParagraph()
 
     # Shodan details table
-    $Table = $Selection.tables.add($Selection.Range,19,2)
+    $Table = $Selection.tables.add($Selection.Range,20,2)
     $Table.Style = "Grid Table 5 Dark - Accent 3"
     $Table.AllowAutoFit = $True
     $Table.AllowPageBreaks = $True
@@ -228,7 +237,7 @@ The address {0}, appears to operate out of {1} and is owned by {2}. Furthermore,
     $Table.Cell(4,1).Range.Text = "Operating System"
     $Table.Cell(4,2).Range.Text = "{0}" -f $ShodanResults.os
     $Table.Cell(5,1).Range.Text = "Tags"
-    $Table.cell(5,2).Range.Text = "{0}" -f $ShodanResults.tags
+    $Table.cell(5,2).Range.Text = "{0}" -f [string]::Join(', ',$ShodanResults.tags)
     $Table.Cell(6,1).Range.Text = "IP"
     $Table.Cell(6,2).Range.Text = "{0}" -f $ShodanResults.ip_str
     $Table.Cell(7,1).Range.Text = "Internet Service Provider"
@@ -239,24 +248,28 @@ The address {0}, appears to operate out of {1} and is owned by {2}. Furthermore,
     $Table.Cell(9,2).Range.Text = "{0}" -f $ShodanResults.latitude
     $Table.Cell(10,1).Range.Text = "Longitude"
     $Table.Cell(10,2).Range.Text = "{0}" -f $ShodanResults.longitude
-    $Table.cell(11,1).Range.Text = "Last Update"
-    $Table.Cell(11,2).Range.Text = "{0}" -f $ShodanResults.last_update
-    $Table.Cell(12,1).Range.Text = "Ports"
-    $Table.Cell(12,2).Range.Text = "{0}" -f ([string]::Join(", ",$ShodanResults.ports))
-    $Table.Cell(13,1).Range.text = "Vulnerabilities"
-    $Table.Cell(13,2).Range.Text = "{0}" -f $vulns
-    $Table.Cell(14,1).Range.Text = "Hostnames"
-    $Table.Cell(14,2).Range.Text = "{0}" -f ([string]::Join(", ",$ShodanResults.hostnames))
-    $Table.Cell(15,1).Range.Text = "Country Code"
-    $Table.Cell(15,2).Range.Text = "{0}" -f $ShodanResults.country_code
-    $Table.Cell(16,1).Range.Text = "Country Name"
-    $Table.cell(16,2).Range.Text = "{0}" -f $ShodanResults.country_name
-    $Table.Cell(17,1).Range.Text = "Domains"
-    $Table.Cell(17,2).Range.Text = "{0}" -f ([string]::Join(", ",$ShodanResults.domains))
-    $Table.Cell(18,1).Range.Text = "Organization"
-    $Table.Cell(18,2).Range.Text = "{0}" -f $ShodanResults.org
-    $Table.Cell(19,1).Range.Text = "ASN"
-    $Table.Cell(19,2).Range.Text = "{0}" -f $ShodanResults.asn
+    $Table.Cell(11,1).Range.Text = "Possible Address (Based on lat/lon)"
+    $LRange = $Table.Cell(11,2).Range
+    $LRange.SetRange(0,$Selection.Range)
+    $Document.Hyperlinks.Add($LRange, "$GeoAddressLink", $null, $null, $GeoAddress)
+    $Table.cell(12,1).Range.Text = "Last Update"
+    $Table.Cell(12,2).Range.Text = "{0}" -f $ShodanResults.last_update
+    $Table.Cell(13,1).Range.Text = "Ports"
+    $Table.Cell(13,2).Range.Text = "{0}" -f ([string]::Join(", ",$ShodanResults.ports))
+    $Table.Cell(14,1).Range.text = "Vulnerabilities"
+    $Table.Cell(14,2).Range.Text = "{0}" -f $vulns
+    $Table.Cell(15,1).Range.Text = "Hostnames"
+    $Table.Cell(15,2).Range.Text = "{0}" -f ([string]::Join(", ",$ShodanResults.hostnames))
+    $Table.Cell(16,1).Range.Text = "Country Code"
+    $Table.Cell(16,2).Range.Text = "{0}" -f $ShodanResults.country_code
+    $Table.Cell(17,1).Range.Text = "Country Name"
+    $Table.cell(17,2).Range.Text = "{0}" -f $ShodanResults.country_name
+    $Table.Cell(18,1).Range.Text = "Domains"
+    $Table.Cell(18,2).Range.Text = "{0}" -f ([string]::Join(", ",$ShodanResults.domains))
+    $Table.Cell(19,1).Range.Text = "Organization"
+    $Table.Cell(19,2).Range.Text = "{0}" -f $ShodanResults.org
+    $Table.Cell(20,1).Range.Text = "ASN"
+    $Table.Cell(20,2).Range.Text = "{0}" -f $ShodanResults.asn
     $Word.Selection.Start = $Document.Content.end
 
     # Generate new pages for each vulnerability 
@@ -273,7 +286,6 @@ The address {0}, appears to operate out of {1} and is owned by {2}. Furthermore,
         $Selection.InsertNewPage()
         $Table = $Selection.tables.add($Selection.Range,1,1)
         $Table.Cell(1,1).Range.Style = "Heading 1"
-        Write-Host $Title
         $Table.Cell(1,1).Range.text = "$Title"
         $Table.range.borders.OutsideLineStyle = 0
         $Table.Cell(1,1).Range.Borders.item(-3).LineStyle = 1
